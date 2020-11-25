@@ -1,0 +1,478 @@
+---
+title: "Electricity Price Foercast Evaluation"
+author: "Richard Liu"
+date: "Version of `r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+institute: SYS 7030 Time Series Analysis & Forecasting, Fall 2020
+nocite: '@*'
+bibliography: refer.bib
+toc: no
+link-citations: yes
+csl: apa.csl
+---
+**Abstract:** The new energy economy environment is going to be increasingly characterized by intermittent electricity resources rather than merely rely on large-scale generation. This trend also means a higher fluctuation and variance in the energy price, which asks for a more sophisticated and reliable way to manage the demand and supply in the energy market for all stakeholders' seek. As the decision base in trade, electricity price has always been the key focus for consumers and prosumers. There have been lots of organizations and individuals working on forecasting electricity prices based on different conditions and information. But how good the forecast is and the variance between forecast price and the realtime price is not well quantified, especially the error distribution is not presented in probabilistic terms. So this project is going to evaluate the electricity price forecast for its performance and risk. We are hoping to get the distribution of forecast errors conditional on different inputs. (e.g. region, time, or a certain price range). We are hoping to characterize the error process in probabilistic terms so that it can help people manage risks and make reasonable decisions.
+
+```{r, setup, include=FALSE}
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE)
+opts_chunk$set(warning=FALSE)
+```
+
+```{r ,load packages, echo=FALSE, include=FALSE}
+library(tidyverse)
+library(here)
+library(dplyr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+```
+
+# Background
+The traditional energy system mainly relied on large-scale electricity generation which is managed by System Operators. Then, the central grid will send power to the local households and households pay bills to energy companies like Dominion Energy for electricity. In this way, local units don't have sufficient information on the energy price and can't make a response to the electricity price.
+
+However, more intermittencies and fluctuations have been added into the system with the rise of distribution energy resources and renewable energy (Wind, Solar, Bio, etc.).  The new system is asking for a more flexible but meanwhile also reliable network. Knowing information on the electricity price will be of great benefits for the energy supply and demand to be regulated to a balanced state.
+```{r, TSO , out.width='100%', fig.align='center', fig.show = 'hold'}
+knitr::include_graphics(here('picture','TSODSO.png'))
+```
+
+The energy market is moving forward to the next stage. Large companies (Siemens, IBM, etc.) are working on building retail markets for energy trades. In the future, where everyone can be the buyer and seller of electricity, the forecast for electricity price will be useful information for decision making.
+```{r, PJM , out.width='80%', fig.align='center', fig.show = 'hold'}
+knitr::include_graphics(here('picture','pjm.png'))
+```
+
+NYISO has developed its market mechanics based on its forecast and real-time price data. However, the preciseness and reliability of the forecast still need to be evaluated in some quantitive and sophisticated way, so that we can make sure the forecast can be treated as solid and reliable information which we can count on. If we make a good evaluation for the forecast, bother the publishers and users of the forecast will be benefited since they can get a better understanding of the forecast error and make better decisions with probabilistic information.
+```{r, market, out.width='80%', fig.align='center', fig.show = 'hold'}
+knitr::include_graphics(here('picture','market.png'))
+```
+
+# Research Steps 
+This research can be mainly divided into three parts.
+
+1. We want to see how the forecast price and real-time price look like, try to evaluate whether the forecast is doing its job.
+
+2. We want to model the forecast error distribution. Try to quantify the risk in probabilistic terms. 
+
+3. We want to Estimate the error distribution based on some conditions.(region, time, etc.). We will characterize the error distribution forecast data conditional on required subsets (e.g required zones or time range).
+
+# The data and the data-generating process
+
+## Data description
+The data we are using is NYISO's electricity LBMP(Locational Based Marginal Price) data.  
+
+Day-Ahead Market LBMP is the forecast price data which is generated every hour across 15 different regions.   
+Real-Time LBMP is the historical record of realtime price which is generated every 5 minutes for 15 different regions.  
+```{r, NYISO, out.width='70%', fig.align='center', fig.show = 'hold'}
+knitr::include_graphics(here('picture','price.png'))
+```
+
+LMBP is an aggregated price combining the energy price, generation losses and congestion cost.
+```{r, lbmp, out.width='70%', fig.align='center', fig.show = 'hold'}
+knitr::include_graphics(here('picture','lbmp.png'))
+```
+
+## The data-generating process
+We will calculate and use the mean value of each 5 minute's realtime price within the hour to coordinate with each hour's forecast price. We will merge one year's data together to evaluate and build the model. So the frequency of the time series will be hourly data and the period of record will be one year.
+
+First, read in the data and see the head of it. 
+```{r,Read in Data,fig.align='center'}
+# read in the data
+df<-read.csv("C:/Users/hebin/OneDrive/merge/nmodel.csv",colClasses=c("factor","character","factor","numeric","numeric","numeric"))
+nrow(df)
+names(df)
+select <- dplyr::select
+df <- select(df,-c(PTID,Losses.Cost,Congestion.Cost))
+# If the realprice is negative value, set it to 0.
+df$realprice[df$realprice<0] <- 0
+head(df)
+str(df)
+```
+This is one year electricity price data. "Name" is the name of 15 different regions(e.g. CAPITL). Time.Stamp is the corresponding time of the records(from 00:00 to 23:00 every day). Realprice is the real-time electricity price, whereas preprice is the forecast price. 
+
+Now we transform the data into tssible, choose the index to be timestamp and key to be Name.
+```{r, time series set up}
+# Standardize the timestamp for working with time series.
+
+df$timestamp <- mdy_hms((paste(df$Time.Stamp, ":00", sep="")))
+dfmonth <- month(df$timestamp)
+
+# df <- select(df,-c(Time.Stamp))
+
+# Transform the data to tsibble, use timestamp as index
+eprice <- as_tibble(df)
+ind <- eprice %>% distinct(timestamp)
+
+eprice_ts <-as_tsibble(eprice, index=timestamp, key = c(Name))
+print(eprice_ts)
+summary(eprice_ts$preprice)
+summary(eprice_ts$realprice)
+```
+As we can see here, the mean is almost equal and the median is about the same which can prove that the forecast is not doing a bad job. However, the maximum price of realtime turns out to extremely high, we may need to decrease the fluctuation.
+
+# Data Exploration
+
+## Exploratory Data Analysis
+First, take a look at the boxplot.
+```{r, boxplot,fig.align='center'}
+# Take a look at boxplot of the price.
+par(mfrow=c(1,2))
+boxplot(eprice_ts$preprice,col="blue",main ="Forecast Price")
+boxplot(eprice_ts$realprice,col="blue",main ="Realtime Price")
+``` 
+It seems like for real-time price, there are more outliers and extreme values which correspond with greater fluctuations and uncertainties in real world. But the median value for both is about the same.
+
+Take look at the histogram. The orange line represents for the mean and the purple line represents for the median.
+```{r, histogram,fig.align='center'}
+# Then, take a look at histgram of the price distribution.
+par(mfrow=c(2,1))
+hist(eprice_ts$preprice, breaks = 100, col="lightblue",xlim=c(0,50),ylim=c(0,90000), xlab="Forecast Price",main = "Histogram of historical forecast price") 
+rug(eprice_ts$preprice)
+abline(v=mean(eprice_ts$preprice),col="orange",lwd=3)
+abline(v=median(eprice_ts$preprice),col="magenta4",lwd=3)
+hist(eprice_ts$realprice, breaks = 100,  col="lightblue", xlim=c(0,50),ylim=c(0,90000), xlab="Realtime Price", main = "Histogram of historical realtime price")
+rug(eprice_ts$realprice)
+abline(v=mean(eprice_ts$realprice),col="orange",lwd=3)
+abline(v=median(eprice_ts$realprice),col="magenta4",lwd=3)
+```
+Similarly, the tail which contains a larger price in the real-time price will be longer. Besides, the price is more densely distributed around the median value and mean value for the realtime price compared with the forecast price.
+
+## Time Series Plot
+Try to plot the one year electricity price and see how it looks like.
+```{r,timeseries plot1,fig.align='center'}
+# Plot the time series to see the pattern and trend of the price through one year.
+par(mfrow=c(3,1))
+ggplot(eprice_ts, aes(x=timestamp)) + geom_line(aes(y=preprice),color = "#00AFBB") +labs(y="Forecast Price", x="Time", title ="Forecast Price Over Time") + coord_cartesian(ylim= c(0,200))
+
+ggplot(eprice_ts, aes(x=timestamp)) + geom_line(aes(y=realprice),color = "#00AFBB") +labs(y="Realtime Price", x="Time", title ="Realtime Price Over Time") 
+
+ggplot(eprice_ts, aes(x=timestamp)) + geom_line(aes(y=realprice),color = "#00AFBB") +labs(y="Realtime Price", x="Time", title ="Realtime Price Over Time") + coord_cartesian(ylim= c(0,200))
+```
+For the forecast, the price in December and August seem to be higher than usual which corresponds with the larger consumption of electricity in cold winter and hot summer. However, the real-time price only tends to be extremely high in August. Since the range of y is different, we get the third plot to adjust axis y to be equal. Clearly, the variance is higher and the large price is more showing up frequently.
+
+Next step, plot the price data of different regions.
+```{r,timeseries plot2,fig.align='center'}
+par(mfrow=c(3,1))
+ggplot(eprice_ts, aes(x=timestamp,color = Name)) + geom_line(aes(y=preprice)) +labs(y="Forecast Price", x="Time", title ="Forecast Price Over Time for 15 different zones") + coord_cartesian(ylim= c(0,200))
+
+ggplot(eprice_ts, aes(x=timestamp,color = Name)) + geom_line(aes(y=realprice)) +labs(y="Realtime Price", x="Time", title ="Realtime Price Over Time for 15 different zones") 
+
+ggplot(eprice_ts, aes(x=timestamp,color = Name)) + geom_line(aes(y=realprice)) +labs(y="Realtime Price", x="Time", title ="Realtime Price Over Time for 15 different zones") + coord_cartesian(ylim= c(0,200))
+```
+LONGIL(Long Island) has an extremely high price of over $1000 in August. We are assuming that the high price is caused by high temperature and corresponding energy demand. But in fact, the summer in LONGIL is warm and the reason that is causing the energy price to go up is the increasing amount of travelers which increases the energy demand.
+
+Use Seasonal Plot to look at the real-time price and forecast price.
+```{r, weekly plot, fig.align='center',out.width="75%"}
+# Get Seasonal Plot to look at the realtime price and forecast price
+library(fabletools)
+library(feasts)
+
+par(mfrow=c(1,2))
+# Get weekly plot
+eprice_ts %>% 
+  filter(Name=="CAPITL") %>%
+  gg_season(preprice, period = "week") + labs(y="Forecast Price", x="Time", title ="Forecast Price Weekly Seasonal Plot")
+
+eprice_ts %>% 
+  filter(Name=="CAPITL") %>%
+  gg_season(realprice, period = "week") + labs(y="Realtime Price", x="Time", title ="Realtime Price Weekly Seasonal Plot")
+```
+The weekly plot shows the price is relatively high during the first several weeks. The price will go up at the beginning of a day, then go up until the peak time around 18:00, and finally, it will go down at midnight. The pattern stays the same but Friday's energy price will be relatively high compared with others.
+
+Get the monthly plot.
+```{r, monthly plot, fig.align='center',out.width="75%"}
+# Get monthly plot
+par(mfrow=c(1,2))
+eprice_ts %>% 
+  filter(Name=="CAPITL") %>%
+  gg_season(preprice, period = "month") + labs(y="Forecast Price", x="Time", title ="Forecast Price Monthly Seasonal Plot")
+
+eprice_ts %>% 
+  filter(Name=="CAPITL") %>%
+  gg_season(realprice, period = "month") + labs(y="Realtime Price", x="Time", title ="Realtime Price Monthly Seasonal Plot")
+```
+November and December will be the winner for the highest price. The pattern seems similar. The price in the middle of the month turns out to be high which is worth exploring later.
+
+# Build linear model
+After looking through the time series plots, We have an intuition of how the price distribution looks like. Try to plot the real-time price and forecast price in the same graph.
+
+The red line is y=x which we assume the forecast works perfect and the blue line is the adjusted line we get from smooth method. 
+```{r, ggplot,fig.align='center',out.width="75%"}
+# Use ggplot to plot the forecast price and realtime price together to get an intuitive look of forecast performance. 
+par(mfrow=c(1,2))
+ggplot(data=eprice_ts, aes(x=preprice, y=realprice)) + scale_fill_viridis_c() + geom_point(color="black", size=0.5, alpha=1/2)+ geom_smooth(size=1, method="lm", se=FALSE)+ coord_cartesian(xlim=c(0,100), ylim= c(0,100)) + geom_abline(color="red",intercept = 0, slope = 1,xlim=c(0,40), ylim= c(0,60))+ labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")
+
+# Next, we plot the error V.S. the forecast price to see whether there is a trend in the error with our forecast.
+ggplot(data=eprice_ts, aes(x=preprice, y=realprice-preprice)) + scale_fill_viridis_c() + geom_point(color="black", size=0.5, alpha=1/2)+ geom_smooth(size=1, method="lm", se=FALSE)+ coord_cartesian(xlim=c(0,100), ylim= c(-75,75)) + labs(x = "Forecast Price", y = "Error",title ="Forecast vs Error")
+```
+Clearly, There seems to be a linear relationship between forecast and real-time price(from the blue line), but it has a difference with an equal relationship(red line y=x) as we expected.
+The error is not normally distributed and there seems to be a linear relationship between the error and forecast price which is not following our assumption.
+
+The first thought is to build a linear model to fit the real-time price and forecast price to reduce the error.
+```{r, build linear model}
+# Build simple linear model
+lm1<-lm(eprice_ts$realprice~preprice,data=eprice_ts)
+summary(lm1)
+# Fit the value with the linear model we built
+fit <-predict(lm1 , data=eprice_ts$preprice)
+error <- eprice_ts$realprice - fit
+# Build another linear model to examine the coefficient
+lm2<-lm(eprice_ts$realprice~fit,data=eprice_ts)
+summary(lm2)
+```
+We are confident to say there is linear relationship within the forecast price and realtime price. 
+
+```{r, see how it works, fig.align='center'}
+# Plot price again
+par(mfrow=c(2,1))
+ggplot(data=eprice_ts, aes(x=fit, y=realprice)) + scale_fill_viridis_c() + geom_point(color="black", size=0.5, alpha=1/2)+ geom_smooth(size=1, method="lm", se=FALSE)+ coord_cartesian(xlim=c(0,100), ylim= c(0,100)) + geom_abline(color="red",intercept = 0, slope = 1,xlim=c(0,40), ylim= c(0,100))+ labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")
+
+# Plot the error again
+ggplot(data=eprice_ts, aes(x=preprice, y=lm2$residuals)) + scale_fill_viridis_c() + geom_point(color="black", size=0.5, alpha=1/2)+ geom_smooth(size=1, method="lm", se=FALSE)+ coord_cartesian(xlim=c(0,100), ylim= c(0,100)) + labs(x = "Forecast Price", y = "Error",title ="Forecast vs Error")
+```
+Now the smooth line coincides with y=x. Still, the error is not normally and identically distributed but at least the mean of 0 is achieved.
+
+Write a function that can estimate the error distribution parameter based on the assumption that the error is normal.
+```{r,out.width="100%",fig.align='center'}
+# Write function for simulation of normal distribution
+normfunction <- function(eprice_tsx, mod) {
+  
+n<- nrow(eprice_tsx)
+res<-mod$residuals
+theta_hat <- mean(res)         # Sample mean
+epsilon_hat <- res-theta_hat   # Model residuals
+ssr <- sum(epsilon_hat^2)    # Sum of squared residuals
+sigma_hat <-sqrt(ssr/(n-1))       # Estimated standard error
+print(theta_hat)
+print(sigma_hat)
+forecast_errors <- sort(rnorm(n, theta_hat, sigma_hat))
+
+# Get the density plot of the errors
+dens <- density(forecast_errors)
+dens2 <- dnorm(forecast_errors,theta_hat,sigma_hat)
+par(mfrow=c(2,1))
+hist(forecast_errors, probability = TRUE, col = "darkslategray4", breaks="fd",main="Histogram of Forecast Errors")
+lines(forecast_errors,dens2,col="red")
+rug(res)
+
+# Get cdf of the normal distribution
+cdf <- cumsum(dens$y * diff(dens$x[1:2]))
+cdf <- cdf / max(cdf) # to correct for the rounding errors
+plot(dens$x,cdf,type="l",main="CDF of Forecast Errors")
+}
+```
+
+We assume that the error follows normal distribution and try to plot the error distribution and CDF of the error before any transformations.
+```{r, before, fig.align='center'}
+# Take a look at the normal distribution simulation before any transformations
+normfunction(eprice_ts,lm2)
+```
+The variance is about 11.20649.
+
+```{r}
+# Define the Box-Cox transformation
+powerTransform <- function(y, lambda1, lambda2 = NULL, method = "boxcox") {
+
+  boxcoxTrans <- function(x, lam1, lam2 = NULL) {
+
+    # if we set lambda2 to zero, it becomes the one parameter transformation
+    lam2 <- ifelse(is.null(lam2), 0, lam2)
+
+    if (lam1 == 0L) {
+      log(y + lam2)
+    } else {
+      (((y + lam2)^lam1) - 1) / lam1
+    }
+  }
+
+  switch(method
+         , boxcox = boxcoxTrans(y, lambda1, lambda2)
+         , tukey = y^lambda1
+  )
+}
+```
+
+Our next step is to take the Box-Cox transformation, and find out whether the error looks better.
+```{r,Box-Coxtransformation, fig.align='center',out.width="75%"}
+# Find the lamda value first
+library(MASS)
+t<-0.00001
+  
+bc<-boxcox((eprice_ts$realprice+t)~fit,data=eprice_ts,objective.name = "Log-Likelihood", optimize = TRUE) 
+lambda <- bc$x[which.max(bc$y)]
+print(lambda)
+
+# Run the transformation
+
+mnew <- lm(powerTransform(eprice_ts$realprice+t, lambda) ~ fit, data=eprice_ts)
+new <- data.frame(fit = eprice_ts$fit)
+fitvalue <- predict(mnew, newdata = new)
+summary(fitvalue)
+  
+ggplot(data=eprice_ts, aes(x=fit, y=mnew$residuals)) + geom_point(alpha = 1) + geom_smooth(size=1, method="lm", se=FALSE) + labs(x = "Forecast Price", y = "Error",title ="Forecast vs Error") +  coord_cartesian(xlim=c(0,100), ylim= c(-75,75))
+
+# Use qqplot to compare the residuals
+op <- par(pty = "s", mfrow = c(1, 2))
+qqnorm(error); qqline(error); 
+qqnorm(mnew$residuals); qqline(mnew$residuals)
+par(op)
+```
+The error looks much better after Box-Cox transformation.
+
+Now assume the error follows normal distribution. Plot the error distribution and CDF of the error after the transformation.
+```{r,after transformation,fig.align='center'}
+# Take a look at the normal distribution simulation after the transformation
+normfunction(eprice_ts,mnew)
+```
+The mean is close to 0. And the variance is much less=1.73。
+
+# Conditional Price Plot
+Use facet to get the price plots based on different conditions.
+
+For different regions
+```{r, different zones, fig.align='center'}
+# Plot Forecast vs Realtime for 15 regions/ Forecast vs Error for 15 regions
+ggplot(data=eprice_ts, aes(x=fit, y=realprice)) + geom_point(alpha = 1) + geom_abline(intercept = 0, slope = 1)+ facet_grid(Name~ .)+labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")+ coord_cartesian(xlim=c(0,100),ylim= c(0,200))
+```
+
+For different regions
+```{r,different zones2,fig.align='center'}
+# Plot Forecast vs Realtime for 15 regions/ Forecast vs Error for 15 regions 
+ggplot(data=eprice_ts, aes(x=fit, y=realprice)) + geom_point(color="steelblue",alpha = 1) +  geom_abline(intercept = 0, slope = 1)+ facet_wrap(vars(Name))+labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")+coord_cartesian(xlim=c(0,100),ylim= c(0,200))
+```
+
+For different times
+```{r,different times,fig.align='center'}
+# Plot Forecast vs Realtime for 24 hours/ Forecast vs Error for 24 hours
+ggplot(data=eprice_ts, aes(x=fit, y=realprice)) + geom_point(color="steelblue",size = 1) + geom_abline(intercept = 0, slope = 1)+ facet_wrap(vars(substr(timestamp,11,16)))+labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")+coord_cartesian(xlim=c(0,100),ylim= c(0,200))
+```
+
+```{r,scatter,fig.align='center'}
+# Plot Forecast vs Realtime for 15 regions and 24 hours
+#ggplot(data=eprice_ts, aes(x=fit, y=realprice)) + geom_point(color="steelblue",size = 1) + geom_abline(intercept = 0, slope = 1)+ facet_grid(Name~substr(timestamp,11,16))+labs(x = "Forecast Price", y = "Realtime Price",title ="Forecast vs Realtime")+coord_cartesian(xlim=c(0,100), ylim= c(0,200))
+```
+
+# Conditional Error Distribution Function
+
+```{r,out.width="60%",fig.align='center'}
+output <- function(ts){
+par(mfrow=c(3,1))  
+library(MASS)
+t<-0.00001
+
+tsreal<-ts$realprice
+new <- data.frame(fit = ts$preprice)
+mfit <- predict(lm2, newdata=new)
+tsnew<-data.frame(tsreal,mfit)
+summary(mfit)
+
+bc<-boxcox((tsreal+t)~mfit,data=tsnew,objective.name = "Log-Likelihood", optimize = TRUE) 
+lambda <- bc$x[which.max(bc$y)]
+mbc <- lm(powerTransform(tsreal+t, lambda) ~ mfit, data=tsnew)
+
+plot2<-ggplot(data=tsnew,aes(x=mfit,y=mbc$residuals),xlim=c(min(ts$preprice),max(ts$preprice)),ylim= c(-10,10)) + geom_point(color="steelblue",alpha = 1)+  geom_abline(intercept = 0, slope = 0)+labs(x = "Forecast Price", y = "Error",title ="Forecast vs Error")
+show(plot2)
+
+
+normfunction(ts,mbc)
+}
+
+```
+
+Define the make distribution function.
+```{r}
+makeDist <- function(pp, delta = 0.2, pl=NULL, mon=NULL){
+  
+  # Input place and month value
+  if( !is.null(pl) & !is.null(mon) ){
+    eprice_ts %>% 
+  filter(preprice >= pp-delta & preprice <= pp+delta) %>%
+  filter(Name == as.character(pl)) %>%
+  filter(month(timestamp) == mon) ->tsx
+    output(tsx)
+  }
+  
+  # Input place value
+  if( !is.null(pl) & is.null(mon) ){
+    eprice_ts %>% 
+  filter(preprice >= pp-delta & preprice <= pp+delta) %>%
+  filter(Name == as.character(pl)) -> tsx
+    output(tsx)
+  }
+  
+  # Input month value
+  if( is.null(pl) & !is.null(mon) ){
+    eprice_ts %>% 
+  filter(preprice >= pp-delta & preprice <= pp+delta) %>%
+  filter(month(timestamp) == mon) -> tsx
+    output(tsx)
+  }
+  
+  # Without place and month value input
+  if( is.null(pl) & is.null(mon) ){
+    eprice_ts %>% 
+  filter(preprice >= pp-delta & preprice <= pp+delta) -> tsx
+    output(tsx)
+  }
+
+}
+```
+
+Set the price to be 18, delta to be 0.5
+```{r,fig.align='center'}
+makeDist(18,0.5)
+```
+
+Set the price to be 20, delta to be 0.5, place to be CENTRL and month to be December
+```{r,fig.align='center'}
+makeDist(20,0.5,"CENTRL",12)
+```
+
+Set the price to be 50, delta to be 5, place to be LONGIL and month to be August
+```{r,fig.align='center'}
+makeDist(50,5,"LONGIL",8)
+```
+
+# Statistical model
+
+## Formal model of the data-generating process
+Variables:
+y: real-time price
+x: preprice(forecast price)
+$\varepsilon$: error term
+
+Conditions:
+p: price
+$\Delta$: price range
+r: regions
+t: times
+
+The basic model is $$y = x + \varepsilon$$
+The assumption is that error follows normal distribution $\varepsilon \sim N(0, \sigma^2 I_T)$.  
+
+For conditional error distribution
+We Fist find the conditional real-time price and forecast price: $y| p,\Delta,r,t $, $x| p,\Delta,r,t $
+In this way, we get the conditional error: $\varepsilon| p,\Delta,r,t $and could estimate $\sigma^2$. Then we get the error distribution and CDF of it.
+
+## Discussion of the statistical model
+
+1. We are using mean value within one hour to represent the real-time price, this may lead to some variance.
+2. There are some missing values in the real-time price data. They are replaced by the mean value of the overall mean value.
+3. We assume the error follows a normal distribution. However, the residual plot and QQ-plot show that it does not strictly follow the normal distribution.
+
+## Future Improvements
+1. Get more data.
+2. Improve the forecast price model. Investigate the key factors that the forecast model is built upon. Decomposition with good understanding of the context.
+3. Refine the model or try other models for the error distribution. We still need to find whether it's good enough to use the normal distribution to represent the error. We may consider other appropriate models for the error distribution.
+4. Test the fitted forecast price's future performance. We want to compare its performance with the simple linear model and auto-selected model's performance.
+  
+# Meanning of the project
+The most important thing is that people start to have recognition of the electricity wholesale market, the basic concept, how it works, and how much direct benefits they can get from it. Though lots of companies emphasizing the impacts and benefits of demand management and microgrid operations, they pay too much attention to the technical sides which is out of peoples' interests. 
+
+The basic idea that better information helps with a better decision seems rather naive but strong enough to persuade a potential user. And the information we provide here is right the focus--the electricity price forecast signal and risk evaluation. After setting up a new standard or a pattern, people will quickly simulate pioneers' behavior and find out their own patterns only if they confirm there is a value in there. Even if the patterns they found for themselves are based on their intuitive thoughts, it will still make a great difference to the mechanism in the market transaction. Eventually, it will contribute to a more efficient market and also a more balanced transaction system.
+
+# References
